@@ -11,14 +11,14 @@ const db = createClient({
   authToken: process.env.TURSO_AUTH_TOKEN!,
 });
 
-// 2. Build the MCP server with two read-only tools
+// 2. Build the MCP server with three tools
 function buildServer(): McpServer {
   const server = new McpServer({
     name: "family-assistant",
     version: "1.0.0",
   });
 
-  // Tool 1: check inventory for low-stock items
+  // Tool 1: check inventory
   server.tool(
     "check_inventory",
     "Check inventory for items below their low-stock threshold.",
@@ -43,7 +43,7 @@ function buildServer(): McpServer {
     }
   );
 
-  // Tool 2: find available appointment slots on a given date
+  // Tool 2: find available slots
   server.tool(
     "find_available_slots",
     "Find available appointment slots on a given date.",
@@ -55,6 +55,46 @@ function buildServer(): McpServer {
           {
             type: "text",
             text: `Available slots on ${date}: ${slots.join(", ")}`,
+          },
+        ],
+      };
+    }
+  );
+
+  // Tool 3: book delivery (requires explicit confirmation)
+  server.tool(
+    "book_delivery",
+    "Book a delivery slot. Only call this AFTER the user has explicitly confirmed the booking.",
+    {
+      item: z.string().describe("Item to be delivered"),
+      date: z.string().describe("Date in YYYY-MM-DD format"),
+      time: z.string().describe("Time in HH:MM format"),
+      confirmed: z
+        .boolean()
+        .describe("Must be true only after the user has said yes to the booking"),
+    },
+    async ({ item, date, time, confirmed }) => {
+      if (confirmed !== true) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Confirmation required. Ask the user: "Shall I book ${item} for ${date} at ${time}?" Do not retry until they say yes.`,
+            },
+          ],
+        };
+      }
+
+      await db.execute({
+        sql: "INSERT INTO appointments (date, time, status) VALUES (?, ?, ?)",
+        args: [date, time, `delivery: ${item}`],
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Booked delivery for ${item} on ${date} at ${time}.`,
           },
         ],
       };
