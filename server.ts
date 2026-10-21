@@ -50,38 +50,24 @@ function buildServer(): McpServer {
   );
 
     server.tool(
-    "find_available_slots",
-    "Find available appointment slots on a given date.",
-    { date: z.string().describe("Date in YYYY-MM-DD format") },
-    async ({ date }) => {
-      // Get all possible slots
-      const allSlots = ["10:00", "14:00", "16:00"];
-
-      // Get booked slots for this date
-      const bookedRs = await db.execute({
-        sql: "SELECT time FROM appointments WHERE date = ?",
-        args: [date],
-      });
-      const bookedTimes = bookedRs.rows.map((r) => String(r.time));
-
-      // Filter out booked ones
-      const availableSlots = allSlots.filter((s) => !bookedTimes.includes(s));
-
-      const text = availableSlots.length
-        ? `Available slots on ${date}: ${availableSlots.join(", ")}`
-        : `No available slots on ${date}. All slots are booked.`;
-
-      return {
-        content: [{ type: "text", text }],
-        structuredContent: {
-          type: "slot_picker",
-          date,
-          slots: availableSlots,
-        },
-      };
-    }
-  );
-
+  "find_available_slots",
+  "Find available appointment slots on a given date.",
+  { date: z.string().describe("Date in YYYY-MM-DD format") },
+  async ({ date }) => {
+    const rs = await db.execute({
+      sql: "SELECT time FROM availability WHERE date = ? AND is_booked = 0 ORDER BY time",
+      args: [date],
+    });
+    const slots = rs.rows.map((r) => String(r.time));
+    const text = slots.length
+      ? `Available slots on ${date}: ${slots.join(", ")}`
+      : `No available slots on ${date}. All slots are booked.`;
+    return {
+      content: [{ type: "text", text }],
+      structuredContent: { type: "slot_picker", date, slots },
+    };
+  }
+);
   server.tool(
     "book_delivery",
     "Book a delivery slot. Only call this AFTER the user has explicitly confirmed.",
@@ -166,6 +152,10 @@ function buildServer(): McpServer {
       await db.execute({
         sql: "INSERT INTO appointments (date, time, status) VALUES (?, ?, ?)",
         args: [date, time, `delivery: ${item}`],
+      });
+	 await db.execute({
+        sql: "UPDATE availability SET is_booked = 1 WHERE date = ? AND time = ?",
+        args: [date, time],
       });
 
       return {
@@ -330,10 +320,9 @@ async function saveMessage(role: string, content: string) {
 }
 
 async function callMcp(name: string, args: any): Promise<{ text: string; structured: any }> {
+  const selfUrl = `http://127.0.0.1:${process.env.PORT || 8081}/mcp`;
   const client = new Client({ name: "self", version: "1.0" }, { capabilities: {} });
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL("http://localhost:8081/mcp"))
-  );
+  await client.connect(new StreamableHTTPClientTransport(new URL(selfUrl)));
   try {
     const result = await client.callTool({ name, arguments: args });
     const text = (result.content as any[]).map((c) => c.text || "").join("\n");
@@ -342,9 +331,7 @@ async function callMcp(name: string, args: any): Promise<{ text: string; structu
   } finally {
     await client.close();
   }
-}
-
-app.post("/chat", async (req, res) => {
+}app.post("/chat", async (req, res) => {
   const { message } = req.body;
   if (!message || typeof message !== "string") {
     return res.status(400).json({ error: "message required" });
