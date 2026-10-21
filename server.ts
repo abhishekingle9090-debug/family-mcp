@@ -18,7 +18,7 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
-// ---------- MCP server (tools) ----------
+// ---------- MCP server (tools with structuredContent) ----------
 function buildServer(): McpServer {
   const server = new McpServer({ name: "family-assistant", version: "1.0.0" });
 
@@ -30,11 +30,23 @@ function buildServer(): McpServer {
       const rs = await db.execute(
         "SELECT item_name, quantity, threshold FROM inventory WHERE quantity <= threshold"
       );
-      const items = rs.rows.map(
-        (r) => `${r.item_name} (qty: ${r.quantity}, threshold: ${r.threshold})`
-      );
+      const items = rs.rows.map((r) => ({
+        name: String(r.item_name),
+        quantity: Number(r.quantity),
+        threshold: Number(r.threshold),
+      }));
+
+      const text = items.length
+        ? `Low stock: ${items.map((i) => `${i.name} (qty: ${i.quantity}, threshold: ${i.threshold})`).join(", ")}`
+        : "All items are sufficiently stocked.";
+
       return {
-        content: [{ type: "text", text: items.length ? `Low stock: ${items.join(", ")}` : "All items are sufficiently stocked." }],
+        content: [{ type: "text", text }],
+        structuredContent: {
+          type: "inventory_alert",
+          items,
+          hasLowStock: items.length > 0,
+        },
       };
     }
   );
@@ -43,9 +55,17 @@ function buildServer(): McpServer {
     "find_available_slots",
     "Find available appointment slots on a given date.",
     { date: z.string().describe("Date in YYYY-MM-DD format") },
-    async ({ date }) => ({
-      content: [{ type: "text", text: `Available slots on ${date}: 10:00, 14:00, 16:00` }],
-    })
+    async ({ date }) => {
+      const slots = ["10:00", "14:00", "16:00"];
+      return {
+        content: [{ type: "text", text: `Available slots on ${date}: ${slots.join(", ")}` }],
+        structuredContent: {
+          type: "slot_picker",
+          date,
+          slots,
+        },
+      };
+    }
   );
 
   server.tool(
@@ -60,14 +80,28 @@ function buildServer(): McpServer {
     async ({ item, date, time, confirmed }) => {
       if (confirmed !== true) {
         return {
-          content: [{ type: "text", text: `Confirmation required. Ask the user: "Shall I book ${item} for ${date} at ${time}?"` }],
+          content: [
+            {
+              type: "text",
+              text: `Confirmation required. Ask the user: "Shall I book ${item} for ${date} at ${time}?"`,
+            },
+          ],
         };
       }
       await db.execute({
         sql: "INSERT INTO appointments (date, time, status) VALUES (?, ?, ?)",
         args: [date, time, `delivery: ${item}`],
       });
-      return { content: [{ type: "text", text: `Booked delivery for ${item} on ${date} at ${time}.` }] };
+      return {
+        content: [{ type: "text", text: `Booked delivery for ${item} on ${date} at ${time}.` }],
+        structuredContent: {
+          type: "booking_confirmation",
+          item,
+          date,
+          time,
+          status: "confirmed",
+        },
+      };
     }
   );
 
@@ -76,36 +110,92 @@ function buildServer(): McpServer {
     "List all booked appointments from the database.",
     {},
     async () => {
-      const rs = await db.execute("SELECT date, time, status FROM appointments ORDER BY date, time");
+      const rs = await db.execute(
+        "SELECT date, time, status FROM appointments ORDER BY date, time"
+      );
       const rows = rs.rows.map((r) => `${r.date} ${r.time} — ${r.status}`);
-      return { content: [{ type: "text", text: rows.length ? rows.join("\n") : "No appointments booked." }] };
+      return {
+        content: [
+          {
+            type: "text",
+            text: rows.length ? rows.join("\n") : "No appointments booked.",
+          },
+        ],
+      };
     }
   );
 
   return server;
 }
 
-// ---------- HTTP server ----------
+// ---------- Express app ----------
 const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
 app.post("/mcp", async (req, res) => {
   const server = buildServer();
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  res.on("close", () => { transport.close(); server.close(); });
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  res.on("close", () => {
+    transport.close();
+    server.close();
+  });
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
+
 app.get("/mcp", (_req, res) => res.status(405).end());
 app.delete("/mcp", (_req, res) => res.status(405).end());
 
-// ---------- Web simulator: /chat ----------
+// ---------- LLM tool definitions ----------
 const LLM_TOOLS = [
-  { type: "function" as const, function: { name: "check_inventory", description: "Check inventory for items below their low-stock threshold.", parameters: { type: "object", properties: {} } } },
-  { type: "function" as const, function: { name: "find_available_slots", description: "Find available slots on a date.", parameters: { type: "object", properties: { date: { type: "string" } }, required: ["date"] } } },
-  { type: "function" as const, function: { name: "book_delivery", description: "Book a delivery. Only with explicit user confirmation.", parameters: { type: "object", properties: { item: { type: "string" }, date: { type: "string" }, time: { type: "string" }, confirmed: { type: "boolean" } }, required: ["item", "date", "time", "confirmed"] } } },
-  { type: "function" as const, function: { name: "list_appointments", description: "List all booked appointments.", parameters: { type: "object", properties: {} } } },
+  {
+    type: "function" as const,
+    function: {
+      name: "check_inventory",
+      description: "Check inventory for items below their low-stock threshold.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "find_available_slots",
+      description: "Find available slots on a date.",
+      parameters: {
+        type: "object",
+        properties: { date: { type: "string" } },
+        required: ["date"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "book_delivery",
+      description: "Book a delivery. Only with explicit user confirmation.",
+      parameters: {
+        type: "object",
+        properties: {
+          item: { type: "string" },
+          date: { type: "string" },
+          time: { type: "string" },
+          confirmed: { type: "boolean" },
+        },
+        required: ["item", "date", "time", "confirmed"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_appointments",
+      description: "List all booked appointments.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
 ];
 
 const SYSTEM_PROMPT = `Current date: ${new Date().toISOString().split("T")[0]}.
@@ -126,12 +216,16 @@ Rules:
 
 let conversation: any[] = [];
 
-async function callMcp(name: string, args: any): Promise<string> {
+async function callMcp(name: string, args: any): Promise<{ text: string; structured: any }> {
   const client = new Client({ name: "self", version: "1.0" }, { capabilities: {} });
-  await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:8081/mcp")));
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL("http://localhost:8081/mcp"))
+  );
   try {
     const result = await client.callTool({ name, arguments: args });
-    return (result.content as any[]).map((c) => c.text || "").join("\n");
+    const text = (result.content as any[]).map((c) => c.text || "").join("\n");
+    const structured = (result as any).structuredContent || null;
+    return { text, structured };
   } finally {
     await client.close();
   }
@@ -139,10 +233,13 @@ async function callMcp(name: string, args: any): Promise<string> {
 
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
-  if (!message || typeof message !== "string") return res.status(400).json({ error: "message required" });
+  if (!message || typeof message !== "string") {
+    return res.status(400).json({ error: "message required" });
+  }
 
   conversation.push({ role: "user", content: message });
   const trace: any[] = [];
+  const cards: any[] = [];
 
   try {
     for (let turn = 0; turn < 6; turn++) {
@@ -158,23 +255,29 @@ app.post("/chat", async (req, res) => {
       conversation.push(msg);
 
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
-        return res.json({ reply: msg.content || "", trace });
+        return res.json({ reply: msg.content || "", trace, cards });
       }
 
       for (const call of msg.tool_calls) {
         const args = JSON.parse(call.function.arguments || "{}");
-        const result = await callMcp(call.function.name, args);
-        trace.push({ tool: call.function.name, args, result });
-        conversation.push({ role: "tool", tool_call_id: call.id, content: result });
+        const { text, structured } = await callMcp(call.function.name, args);
+        trace.push({ tool: call.function.name, args, result: text });
+        if (structured) cards.push(structured);
+        conversation.push({ role: "tool", tool_call_id: call.id, content: text });
       }
     }
-    return res.json({ reply: "I couldn't finish that. Try rephrasing.", trace });
+    return res.json({ reply: "I couldn't finish that. Try rephrasing.", trace, cards });
   } catch (e: any) {
     return res.status(500).json({ error: e.message, trace });
   }
 });
 
-app.post("/reset", (_req, res) => { conversation = []; res.json({ ok: true }); });
+app.post("/reset", (_req, res) => {
+  conversation = [];
+  res.json({ ok: true });
+});
 
 const PORT = process.env.PORT || 8081;
-app.listen(PORT, () => console.log(`MCP + web UI on http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`MCP + web UI on http://localhost:${PORT}`);
+});

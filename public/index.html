@@ -6,109 +6,34 @@
 <title>Family Caretaker</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: system-ui, -apple-system, sans-serif;
-    background: #f6f3ee;
-    color: #2b2b2b;
-    height: 100vh;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-  }
-  #app {
-    width: 100%;
-    max-width: 560px;
-    height: 90vh;
-    background: white;
-    border-radius: 16px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.08);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  header {
-    padding: 18px 20px;
-    background: #e8f0e6;
-    color: #2d4a2d;
-    font-weight: 600;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  header button {
-    background: none;
-    border: none;
-    color: #2d4a2d;
-    cursor: pointer;
-    font-size: 13px;
-    text-decoration: underline;
-  }
-  #messages {
-    flex: 1;
-    padding: 20px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .msg {
-    padding: 10px 14px;
-    border-radius: 14px;
-    max-width: 85%;
-    line-height: 1.45;
-    font-size: 15px;
-    white-space: pre-wrap;
-  }
-  .user {
-    background: #4a6b4a;
-    color: white;
-    align-self: flex-end;
-    border-bottom-right-radius: 4px;
-  }
-  .agent {
-    background: #f0ede8;
-    color: #2b2b2b;
-    align-self: flex-start;
-    border-bottom-left-radius: 4px;
-  }
-  .trace {
-    font-size: 11px;
-    color: #666;
-    font-family: ui-monospace, monospace;
-    padding: 6px 10px;
-    background: #faf8f4;
-    border-radius: 6px;
-    align-self: flex-start;
-    max-width: 90%;
-    word-break: break-word;
-    white-space: pre-wrap;
-  }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f6f3ee; color: #2b2b2b; height: 100vh; display: flex; justify-content: center; align-items: center; }
+  #app { width: 100%; max-width: 600px; height: 90vh; background: white; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.08); display: flex; flex-direction: column; overflow: hidden; }
+  header { padding: 18px 20px; background: #e8f0e6; color: #2d4a2d; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  header button { background: none; border: none; color: #2d4a2d; cursor: pointer; font-size: 13px; text-decoration: underline; }
+  #messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  .msg { padding: 10px 14px; border-radius: 14px; max-width: 85%; line-height: 1.45; font-size: 15px; white-space: pre-wrap; }
+  .user { background: #4a6b4a; color: white; align-self: flex-end; border-bottom-right-radius: 4px; }
+  .agent { background: #f0ede8; color: #2b2b2b; align-self: flex-start; border-bottom-left-radius: 4px; }
+  .trace { font-size: 11px; color: #666; font-family: ui-monospace, monospace; padding: 6px 10px; background: #faf8f4; border-radius: 6px; align-self: flex-start; max-width: 90%; word-break: break-word; }
   .trace strong { color: #4a6b4a; }
-  form {
-    display: flex;
-    padding: 12px;
-    gap: 8px;
-    border-top: 1px solid #eee;
-  }
-  input {
-    flex: 1;
-    padding: 12px 16px;
-    border: 1px solid #ddd;
-    border-radius: 24px;
-    font-size: 15px;
-    outline: none;
-  }
+  form { display: flex; padding: 12px; gap: 8px; border-top: 1px solid #eee; }
+  input { flex: 1; padding: 12px 16px; border: 1px solid #ddd; border-radius: 24px; font-size: 15px; outline: none; }
   input:focus { border-color: #4a6b4a; }
-  button[type=submit] {
-    padding: 12px 20px;
-    background: #4a6b4a;
-    color: white;
-    border: none;
-    border-radius: 24px;
-    cursor: pointer;
-    font-size: 15px;
-  }
-  button[type=submit]:disabled { opacity: 0.5; cursor: default; }
+  button[type=submit] { padding: 12px 20px; background: #4a6b4a; color: white; border: none; border-radius: 24px; cursor: pointer; font-size: 15px; }
+  button[type=submit]:disabled { opacity: 0.5; }
+
+  /* Cards */
+  .card { background: white; border: 1px solid #e0dcd5; border-radius: 12px; padding: 14px 16px; align-self: flex-start; max-width: 90%; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+  .card-alert { border-left: 4px solid #d9534f; background: #fdf5f5; }
+  .card-slots { border-left: 4px solid #4a6b4a; background: #f5f8f4; }
+  .card-success { border-left: 4px solid #2d7a2d; background: #f0f8f0; }
+  .card-title { font-weight: 600; margin-bottom: 8px; color: #2b2b2b; }
+  .card-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #f0ece6; }
+  .card-row:last-child { border-bottom: none; }
+  .badge { background: #d9534f; color: white; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+  .slot-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .slot-btn { padding: 8px 16px; background: #4a6b4a; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .slot-btn:hover { background: #3a5a3a; }
 </style>
 </head>
 <body>
@@ -142,12 +67,43 @@ function addTrace(trace) {
   if (!trace || !trace.length) return;
   const div = document.createElement("div");
   div.className = "trace";
-  div.innerHTML = trace.map(function(t) {
-    var resultShort = String(t.result || "").slice(0, 100);
-    return "<strong>" + t.tool + "</strong>(" + JSON.stringify(t.args) + ") → " + resultShort;
-  }).join("<br>");
+  div.innerHTML = trace.map(t =>
+    "<strong>" + t.tool + "</strong>(" + JSON.stringify(t.args) + ") → " + String(t.result || "").slice(0, 100)
+  ).join("<br>");
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function renderCard(card) {
+  if (!card || !card.type) return;
+  const div = document.createElement("div");
+
+  if (card.type === "inventory_alert") {
+    div.className = "card card-alert";
+    var rows = (card.items || []).map(function(i) {
+      return '<div class="card-row"><span>' + i.name + '</span><span class="badge">' + i.quantity + ' left</span></div>';
+    }).join("");
+    div.innerHTML = '<div class="card-title">⚠️ Low Stock Alert</div>' + rows;
+  } else if (card.type === "slot_picker") {
+    div.className = "card card-slots";
+    var btns = (card.slots || []).map(function(s) {
+      return '<button class="slot-btn" onclick="pickSlot(\'' + s + '\',\'' + card.date + '\')">' + s + '</button>';
+    }).join("");
+    div.innerHTML = '<div class="card-title">📅 Available Slots — ' + card.date + '</div><div class="slot-buttons">' + btns + '</div>';
+  } else if (card.type === "booking_confirmation") {
+    div.className = "card card-success";
+    div.innerHTML = '<div class="card-title">✅ Booking Confirmed</div>' +
+      '<div class="card-row"><span>' + card.item + '</span></div>' +
+      '<div class="card-row"><span>' + card.date + ' at ' + card.time + '</span></div>';
+  } else {
+    return;
+  }
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function pickSlot(time, date) {
+  send("Yes, book the " + time + " slot on " + date + " for the low stock item");
 }
 
 async function send(text) {
@@ -164,6 +120,7 @@ async function send(text) {
     const data = await res.json();
     thinking.textContent = data.reply || data.error || "(no reply)";
     addTrace(data.trace);
+    if (data.cards) data.cards.forEach(renderCard);
   } catch (e) {
     thinking.textContent = "Error: " + e.message;
   } finally {
