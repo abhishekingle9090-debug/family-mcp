@@ -1,24 +1,24 @@
 {
   "name": "family-mcp-zero-budget",
   "version": "1.0.0",
-  "description": "",
+  "type": "module",
   "main": "index.js",
   "scripts": {
-  "start": "tsx server.ts"
-}
+    "start": "tsx server.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "dependencies": {
-    "@libsql/client": "^0.18.0",
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "dotenv": "^18.0.8",
-    "express": "^5.3.0",
-    "openai": "^7.39.0",
-    "zod": "^4.6.7"
+  "engines": {
+    "node": "22.x"
   },
-  "devDependencies": {
-    "tsx": "^4.23.15"
+  "dependencies": {
+    "@libsql/client": "*",
+    "@modelcontextprotocol/sdk": "*",
+    "dotenv": "*",
+    "express": "*",
+    "openai": "*",
+    "tsx": "*",
+    "zod": "*"
   }
 }
