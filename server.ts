@@ -49,15 +49,35 @@ function buildServer(): McpServer {
     }
   );
 
-  server.tool(
+    server.tool(
     "find_available_slots",
     "Find available appointment slots on a given date.",
     { date: z.string().describe("Date in YYYY-MM-DD format") },
     async ({ date }) => {
-      const slots = ["10:00", "14:00", "16:00"];
+      // Get all possible slots
+      const allSlots = ["10:00", "14:00", "16:00"];
+
+      // Get booked slots for this date
+      const bookedRs = await db.execute({
+        sql: "SELECT time FROM appointments WHERE date = ?",
+        args: [date],
+      });
+      const bookedTimes = bookedRs.rows.map((r) => String(r.time));
+
+      // Filter out booked ones
+      const availableSlots = allSlots.filter((s) => !bookedTimes.includes(s));
+
+      const text = availableSlots.length
+        ? `Available slots on ${date}: ${availableSlots.join(", ")}`
+        : `No available slots on ${date}. All slots are booked.`;
+
       return {
-        content: [{ type: "text", text: `Available slots on ${date}: ${slots.join(", ")}` }],
-        structuredContent: { type: "slot_picker", date, slots },
+        content: [{ type: "text", text }],
+        structuredContent: {
+          type: "slot_picker",
+          date,
+          slots: availableSlots,
+        },
       };
     }
   );
@@ -72,6 +92,7 @@ function buildServer(): McpServer {
       confirmed: z.boolean().describe("Must be true only after the user said yes"),
     },
     async ({ item, date, time, confirmed }) => {
+      // RULE 1: Confirmation gate
       if (confirmed !== true) {
         return {
           content: [
@@ -82,12 +103,78 @@ function buildServer(): McpServer {
           ],
         };
       }
+
+      // RULE 2: Item must exist in inventory
+      const itemCheck = await db.execute({
+        sql: "SELECT item_name FROM inventory WHERE LOWER(item_name) = LOWER(?)",
+        args: [item],
+      });
+      if (itemCheck.rows.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Rejected: "${item}" is not in the inventory. I can only book items that exist in the system.`,
+            },
+          ],
+        };
+      }
+
+      // RULE 3: Date must be today or in the future
+      const today = new Date().toISOString().split("T")[0];
+      if (date < today) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Rejected: ${date} is in the past. Today is ${today}. I can only book future dates.`,
+            },
+          ],
+        };
+      }
+
+      // RULE 4: Time must be a valid slot (10:00, 14:00, 16:00)
+      const validSlots = ["10:00", "14:00", "16:00"];
+      if (!validSlots.includes(time)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Rejected: ${time} is not a valid slot. Available slots are: ${validSlots.join(", ")}.`,
+            },
+          ],
+        };
+      }
+
+      // RULE 5: Slot must not already be booked for that date
+      const slotCheck = await db.execute({
+        sql: "SELECT id FROM appointments WHERE date = ? AND time = ?",
+        args: [date, time],
+      });
+      if (slotCheck.rows.length > 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Rejected: ${date} at ${time} is already booked. Please choose a different slot.`,
+            },
+          ],
+        };
+      }
+
+      // All checks passed — write to DB
       await db.execute({
         sql: "INSERT INTO appointments (date, time, status) VALUES (?, ?, ?)",
         args: [date, time, `delivery: ${item}`],
       });
+
       return {
-        content: [{ type: "text", text: `Booked delivery for ${item} on ${date} at ${time}.` }],
+        content: [
+          {
+            type: "text",
+            text: `Booked delivery for ${item} on ${date} at ${time}.`,
+          },
+        ],
         structuredContent: {
           type: "booking_confirmation",
           item,
@@ -207,6 +294,12 @@ Rules:
 - Never call book_delivery with confirmed=true without explicit user yes.
 - If any tool errors, tell the user it failed. Never claim success.
 - Only say "booked" if book_delivery returned a result starting with "Booked".
+IMPORTANT — BOOKING BEHAVIOR:
+- When the user asks to book something (any item, any date, any time), you MUST call book_delivery immediately with confirmed=true.
+- Do NOT just say "shall I book it" and stop. Call the tool and let the safety rules decide.
+- If book_delivery returns "Rejected: ...", tell the user the exact reason and suggest alternatives.
+- Never accept a past date or an invalid item on your own. Always call book_delivery and let the tool validate.
+- If book_delivery returns a message starting with "Rejected:", tell the user exactly why and do not retry with the same arguments.
 - Keep replies short and warm.`;
 
 let conversation: any[] = [];
