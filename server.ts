@@ -18,7 +18,6 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
-// Tracks items already notified, so we don't spam
 const notifiedItems = new Set<string>();
 
 // ---------- MCP server (tools) ----------
@@ -192,7 +191,6 @@ function buildServer(): McpServer {
         args: [date, time],
       });
 
-      // Item booked — don't notify about it again
       notifiedItems.delete(item);
 
       return {
@@ -319,21 +317,25 @@ const LLM_TOOLS = [
 const SYSTEM_PROMPT = `Current date: ${new Date().toISOString().split("T")[0]}.
 You are a proactive family caretaker assistant.
 
+LANGUAGE:
+- Reply in the same language the user used. If they wrote in Hindi (Devanagari or Roman Hindi like "Tylenol low hai, book kar do"), reply in natural Hindi. Otherwise reply in English.
+- Keep replies short, warm, and natural in whichever language you use.
+
 STRICT TOOL ORDER (do not skip):
 When responding to a greeting or a delivery request, you MUST call the tools in this exact order:
   1. check_inventory
   2. check_weather (ALWAYS, no exceptions — use "Mumbai" as the city if unknown, and today's date)
   3. find_available_slots (for today, or tomorrow if weather says rain > 50%)
-  4. reply with a proposal and ask "Shall I book it?"
+  4. reply with a proposal and ask for confirmation (in the user's language)
 Never call find_available_slots before check_weather. If you skip check_weather, the response is invalid.
 
 WEATHER-AWARE DELIVERY:
-- If check_weather returns rain chance > 50%, propose TOMORROW's slot instead of today, and tell the user the reason ("it's likely to rain today").
+- If check_weather returns rain chance > 50%, propose TOMORROW's slot instead of today, and tell the user the reason.
 - If weather is fine, propose today's slots normally.
 
 CONFIRMATION FLOW:
-- After proposing a slot, WAIT for explicit "yes" from the user.
-- Only after the user says yes, call book_delivery with confirmed=true.
+- After proposing a slot, WAIT for explicit confirmation from the user (yes / haan / theek hai / book karo).
+- Only after the user confirms, call book_delivery with confirmed=true.
 
 REJECTION HANDLING:
 - If book_delivery returns "Rejected: ...", tell the user the exact reason and suggest alternatives.
@@ -342,8 +344,7 @@ REJECTION HANDLING:
 OTHER RULES:
 - If the user asks what's booked or about appointments, call list_appointments and report the result.
 - If the user says "book X for date/time" directly, call book_delivery immediately with confirmed=true — let the tool validate.
-- If any tool errors, tell the user it failed. Never claim success.
-- Keep replies short and warm.`;
+- If any tool errors, tell the user it failed. Never claim success.`;
 
 let conversation: any[] = [];
 
@@ -451,7 +452,6 @@ app.get("/events", (req, res) => {
   res.flushHeaders();
 
   sseClients.push(res);
-  // Initial ping so client knows connection is live
   res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
 
   req.on("close", () => {
@@ -466,12 +466,11 @@ function broadcastSSE(payload: any) {
     try {
       client.write(data);
     } catch (e) {
-      // ignore dead clients
+      // ignore
     }
   }
 }
 
-// Keep-alive ping every 25s so proxies (Render) don't kill idle SSE
 setInterval(() => {
   for (const client of sseClients) {
     try {
@@ -482,7 +481,6 @@ setInterval(() => {
   }
 }, 25000);
 
-// Background proactive check
 const PROACTIVE_INTERVAL_MS = Number(process.env.PROACTIVE_INTERVAL_MS || 30000);
 
 setInterval(async () => {
@@ -497,14 +495,15 @@ setInterval(async () => {
       notifiedItems.add(name);
 
       const message = `Heads up: ${name} is running low (${row.quantity} left). Want me to book a delivery?`;
+      const messageHi = `ध्यान दें: ${name} की स्टॉक कम है (${row.quantity} बचे हैं)। क्या मैं डिलीवरी बुक करूँ?`;
 
-      // Give the LLM the context so a follow-up "yes" makes sense
       conversation.push({ role: "assistant", content: message });
       await saveMessage("assistant", message);
 
-      broadcastSSE({
+            broadcastSSE({
         type: "proactive",
         message,
+        messageHi,
         card: {
           type: "inventory_alert",
           items: [{ name, quantity: Number(row.quantity), threshold: Number(row.threshold) }],
