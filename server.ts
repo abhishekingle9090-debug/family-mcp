@@ -40,34 +40,83 @@ function buildServer(): McpServer {
         : "All items are sufficiently stocked.";
       return {
         content: [{ type: "text", text }],
-        structuredContent: {
-          type: "inventory_alert",
-          items,
-          hasLowStock: items.length > 0,
-        },
+        structuredContent: { type: "inventory_alert", items, hasLowStock: items.length > 0 },
       };
     }
   );
 
-    server.tool(
-  "find_available_slots",
-  "Find available appointment slots on a given date.",
-  { date: z.string().describe("Date in YYYY-MM-DD format") },
-  async ({ date }) => {
-    const rs = await db.execute({
-      sql: "SELECT time FROM availability WHERE date = ? AND is_booked = 0 ORDER BY time",
-      args: [date],
-    });
-    const slots = rs.rows.map((r) => String(r.time));
-    const text = slots.length
-      ? `Available slots on ${date}: ${slots.join(", ")}`
-      : `No available slots on ${date}. All slots are booked.`;
-    return {
-      content: [{ type: "text", text }],
-      structuredContent: { type: "slot_picker", date, slots },
-    };
-  }
-);
+  server.tool(
+    "find_available_slots",
+    "Find available appointment slots on a given date.",
+    { date: z.string().describe("Date in YYYY-MM-DD format") },
+    async ({ date }) => {
+      const rs = await db.execute({
+        sql: "SELECT time FROM availability WHERE date = ? AND is_booked = 0 ORDER BY time",
+        args: [date],
+      });
+      const slots = rs.rows.map((r) => String(r.time));
+      const text = slots.length
+        ? `Available slots on ${date}: ${slots.join(", ")}`
+        : `No available slots on ${date}. All slots are booked.`;
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: { type: "slot_picker", date, slots },
+      };
+    }
+  );
+
+  server.tool(
+    "check_weather",
+    "Check the weather forecast for a city and date to decide if delivery is safe today.",
+    {
+      city: z.string().describe("City name like Mumbai"),
+      date: z.string().describe("Date in YYYY-MM-DD format"),
+    },
+    async ({ city, date }) => {
+      try {
+        const geoRes = await fetch(
+          `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1`
+        );
+        const geoData: any = await geoRes.json();
+        if (!geoData.results || geoData.results.length === 0) {
+          return {
+            content: [{ type: "text", text: `Could not find city "${city}".` }],
+          };
+        }
+        const lat = geoData.results[0].latitude;
+        const lon = geoData.results[0].longitude;
+
+        const weatherRes = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=precipitation_probability_max,weathercode&start_date=${date}&end_date=${date}&timezone=auto`
+        );
+        const weatherData: any = await weatherRes.json();
+        const rain = weatherData.daily?.precipitation_probability_max?.[0] ?? 0;
+        const code = weatherData.daily?.weathercode?.[0] ?? 0;
+        const isRainy = rain > 50 || code >= 51;
+
+        const summary = isRainy
+          ? `Rain likely on ${date} in ${city} (${rain}% chance).`
+          : `Weather looks fine on ${date} in ${city} (${rain}% rain chance).`;
+
+        return {
+          content: [{ type: "text", text: summary }],
+          structuredContent: {
+            type: "weather_forecast",
+            city,
+            date,
+            rainChance: rain,
+            isRainy,
+            summary,
+          },
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Weather check failed: ${e.message}` }],
+        };
+      }
+    }
+  );
+
   server.tool(
     "book_delivery",
     "Book a delivery slot. Only call this AFTER the user has explicitly confirmed.",
@@ -78,7 +127,6 @@ function buildServer(): McpServer {
       confirmed: z.boolean().describe("Must be true only after the user said yes"),
     },
     async ({ item, date, time, confirmed }) => {
-      // RULE 1: Confirmation gate
       if (confirmed !== true) {
         return {
           content: [
@@ -90,7 +138,6 @@ function buildServer(): McpServer {
         };
       }
 
-      // RULE 2: Item must exist in inventory
       const itemCheck = await db.execute({
         sql: "SELECT item_name FROM inventory WHERE LOWER(item_name) = LOWER(?)",
         args: [item],
@@ -106,7 +153,6 @@ function buildServer(): McpServer {
         };
       }
 
-      // RULE 3: Date must be today or in the future
       const today = new Date().toISOString().split("T")[0];
       if (date < today) {
         return {
@@ -119,52 +165,32 @@ function buildServer(): McpServer {
         };
       }
 
-      // RULE 4: Time must be a valid slot (10:00, 14:00, 16:00)
-      const validSlots = ["10:00", "14:00", "16:00"];
-      if (!validSlots.includes(time)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Rejected: ${time} is not a valid slot. Available slots are: ${validSlots.join(", ")}.`,
-            },
-          ],
-        };
-      }
-
-      // RULE 5: Slot must not already be booked for that date
       const slotCheck = await db.execute({
-        sql: "SELECT id FROM appointments WHERE date = ? AND time = ?",
+        sql: "SELECT time FROM availability WHERE date = ? AND time = ? AND is_booked = 0",
         args: [date, time],
       });
-      if (slotCheck.rows.length > 0) {
+      if (slotCheck.rows.length === 0) {
         return {
           content: [
             {
               type: "text",
-              text: `Rejected: ${date} at ${time} is already booked. Please choose a different slot.`,
+              text: `Rejected: ${date} at ${time} is not available. It may be booked or outside business hours.`,
             },
           ],
         };
       }
 
-      // All checks passed — write to DB
       await db.execute({
         sql: "INSERT INTO appointments (date, time, status) VALUES (?, ?, ?)",
         args: [date, time, `delivery: ${item}`],
       });
-	 await db.execute({
+      await db.execute({
         sql: "UPDATE availability SET is_booked = 1 WHERE date = ? AND time = ?",
         args: [date, time],
       });
 
       return {
-        content: [
-          {
-            type: "text",
-            text: `Booked delivery for ${item} on ${date} at ${time}.`,
-          },
-        ],
+        content: [{ type: "text", text: `Booked delivery for ${item} on ${date} at ${time}.` }],
         structuredContent: {
           type: "booking_confirmation",
           item,
@@ -245,6 +271,21 @@ const LLM_TOOLS = [
   {
     type: "function" as const,
     function: {
+      name: "check_weather",
+      description: "Check if weather is safe for delivery on a given date. Call before proposing slots.",
+      parameters: {
+        type: "object",
+        properties: {
+          city: { type: "string" },
+          date: { type: "string" },
+        },
+        required: ["city", "date"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "book_delivery",
       description: "Book a delivery. Only with explicit user confirmation.",
       parameters: {
@@ -272,33 +313,35 @@ const LLM_TOOLS = [
 const SYSTEM_PROMPT = `Current date: ${new Date().toISOString().split("T")[0]}.
 You are a proactive family caretaker assistant.
 
-Flow:
-1. If the user's message is just a greeting (hi, hello, hey), DO NOT just greet back. Immediately call check_inventory. If items are low, tell the user what's low and propose a slot. If nothing is low, greet normally.
-2. On any help request, call check_inventory.
-3. If items are low, call find_available_slots for today's date.
-4. Reply briefly, naming the low item, proposing ONE slot, and asking "Shall I book it?".
-5. Wait for explicit "yes". Only then call book_delivery with confirmed=true.
-6. If the user asks what's booked, what deliveries exist, what appointments are scheduled, or anything similar, you MUST call list_appointments and report the result. Never ignore this question.
+STRICT TOOL ORDER (do not skip):
+When responding to a greeting or a delivery request, you MUST call the tools in this exact order:
+  1. check_inventory
+  2. check_weather (ALWAYS, no exceptions — use "Mumbai" as the city if unknown, and today's date)
+  3. find_available_slots (for today, or tomorrow if weather says rain > 50%)
+  4. reply with a proposal and ask "Shall I book it?"
+Never call find_available_slots before check_weather. If you skip check_weather, the response is invalid.
 
-Rules:
-- Never call book_delivery with confirmed=true without explicit user yes.
-- If any tool errors, tell the user it failed. Never claim success.
-- Only say "booked" if book_delivery returned a result starting with "Booked".
-IMPORTANT — BOOKING BEHAVIOR:
-- When the user asks to book something (any item, any date, any time), you MUST call book_delivery immediately with confirmed=true.
-- Do NOT just say "shall I book it" and stop. Call the tool and let the safety rules decide.
+WEATHER-AWARE DELIVERY:
+- If check_weather returns rain chance > 50%, propose TOMORROW's slot instead of today, and tell the user the reason ("it's likely to rain today").
+- If weather is fine, propose today's slots normally.
+
+CONFIRMATION FLOW:
+- After proposing a slot, WAIT for explicit "yes" from the user.
+- Only after the user says yes, call book_delivery with confirmed=true.
+
+REJECTION HANDLING:
 - If book_delivery returns "Rejected: ...", tell the user the exact reason and suggest alternatives.
-- Never accept a past date or an invalid item on your own. Always call book_delivery and let the tool validate.
-- If book_delivery returns a message starting with "Rejected:", tell the user exactly why and do not retry with the same arguments.
-- Keep replies short and warm.`;
+- Never claim success unless book_delivery returned a result starting with "Booked".
 
-let conversation: any[] = [];
+OTHER RULES:
+- If the user asks what's booked or about appointments, call list_appointments and report the result.
+- If the user says "book X for date/time" directly, call book_delivery immediately with confirmed=true — let the tool validate.
+- If any tool errors, tell the user it failed. Never claim success.
+- Keep replies short and warm.`;let conversation: any[] = [];
 
 async function loadConversation(): Promise<any[]> {
   try {
-    const rs = await db.execute(
-      "SELECT role, content FROM sessions ORDER BY id ASC"
-    );
+    const rs = await db.execute("SELECT role, content FROM sessions ORDER BY id ASC");
     return rs.rows
       .map((r) => ({ role: String(r.role), content: String(r.content) }))
       .filter((m) => m.content && m.content.trim().length > 0);
@@ -331,13 +374,14 @@ async function callMcp(name: string, args: any): Promise<{ text: string; structu
   } finally {
     await client.close();
   }
-}app.post("/chat", async (req, res) => {
+}
+
+app.post("/chat", async (req, res) => {
   const { message } = req.body;
   if (!message || typeof message !== "string") {
     return res.status(400).json({ error: "message required" });
   }
 
-  // Save the user's message
   await saveMessage("user", message);
   conversation.push({ role: "user", content: message });
 
@@ -345,7 +389,7 @@ async function callMcp(name: string, args: any): Promise<{ text: string; structu
   const cards: any[] = [];
 
   try {
-    for (let turn = 0; turn < 6; turn++) {
+    for (let turn = 0; turn < 8; turn++) {
       const response = await groq.chat.completions.create({
         model: "openai/gpt-oss-120b",
         messages: [{ role: "system", content: SYSTEM_PROMPT }, ...conversation],
@@ -358,7 +402,6 @@ async function callMcp(name: string, args: any): Promise<{ text: string; structu
       conversation.push(msg);
 
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
-        // Save assistant reply to Turso
         await saveMessage("assistant", msg.content || "");
         return res.json({ reply: msg.content || "", trace, cards });
       }
@@ -388,7 +431,6 @@ app.post("/reset", async (_req, res) => {
   res.json({ ok: true });
 });
 
-// Load previous conversation on startup
 (async () => {
   conversation = await loadConversation();
   const PORT = process.env.PORT || 8081;
