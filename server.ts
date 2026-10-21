@@ -18,7 +18,7 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
-// ---------- MCP server (tools with structuredContent) ----------
+// ---------- MCP server (tools) ----------
 function buildServer(): McpServer {
   const server = new McpServer({ name: "family-assistant", version: "1.0.0" });
 
@@ -35,11 +35,9 @@ function buildServer(): McpServer {
         quantity: Number(r.quantity),
         threshold: Number(r.threshold),
       }));
-
       const text = items.length
         ? `Low stock: ${items.map((i) => `${i.name} (qty: ${i.quantity}, threshold: ${i.threshold})`).join(", ")}`
         : "All items are sufficiently stocked.";
-
       return {
         content: [{ type: "text", text }],
         structuredContent: {
@@ -59,11 +57,7 @@ function buildServer(): McpServer {
       const slots = ["10:00", "14:00", "16:00"];
       return {
         content: [{ type: "text", text: `Available slots on ${date}: ${slots.join(", ")}` }],
-        structuredContent: {
-          type: "slot_picker",
-          date,
-          slots,
-        },
+        structuredContent: { type: "slot_picker", date, slots },
       };
     }
   );
@@ -202,11 +196,12 @@ const SYSTEM_PROMPT = `Current date: ${new Date().toISOString().split("T")[0]}.
 You are a proactive family caretaker assistant.
 
 Flow:
-1. On any help request, call check_inventory.
-2. If items are low, call find_available_slots for today's date.
-3. Reply briefly, naming the low item, proposing ONE slot, and asking "Shall I book it?".
-4. Wait for explicit "yes". Only then call book_delivery with confirmed=true.
-5. If asked what's booked, call list_appointments.
+1. If the user's message is just a greeting (hi, hello, hey), DO NOT just greet back. Immediately call check_inventory. If items are low, tell the user what's low and propose a slot. If nothing is low, greet normally.
+2. On any help request, call check_inventory.
+3. If items are low, call find_available_slots for today's date.
+4. Reply briefly, naming the low item, proposing ONE slot, and asking "Shall I book it?".
+5. Wait for explicit "yes". Only then call book_delivery with confirmed=true.
+6. If the user asks what's booked, what deliveries exist, what appointments are scheduled, or anything similar, you MUST call list_appointments and report the result. Never ignore this question.
 
 Rules:
 - Never call book_delivery with confirmed=true without explicit user yes.
@@ -215,6 +210,31 @@ Rules:
 - Keep replies short and warm.`;
 
 let conversation: any[] = [];
+
+async function loadConversation(): Promise<any[]> {
+  try {
+    const rs = await db.execute(
+      "SELECT role, content FROM sessions ORDER BY id ASC"
+    );
+    return rs.rows
+      .map((r) => ({ role: String(r.role), content: String(r.content) }))
+      .filter((m) => m.content && m.content.trim().length > 0);
+  } catch (e) {
+    console.error("loadConversation failed:", e);
+    return [];
+  }
+}
+
+async function saveMessage(role: string, content: string) {
+  try {
+    await db.execute({
+      sql: "INSERT INTO sessions (role, content) VALUES (?, ?)",
+      args: [role, content || ""],
+    });
+  } catch (e) {
+    console.error("saveMessage failed:", e);
+  }
+}
 
 async function callMcp(name: string, args: any): Promise<{ text: string; structured: any }> {
   const client = new Client({ name: "self", version: "1.0" }, { capabilities: {} });
@@ -237,7 +257,10 @@ app.post("/chat", async (req, res) => {
     return res.status(400).json({ error: "message required" });
   }
 
+  // Save the user's message
+  await saveMessage("user", message);
   conversation.push({ role: "user", content: message });
+
   const trace: any[] = [];
   const cards: any[] = [];
 
@@ -255,6 +278,8 @@ app.post("/chat", async (req, res) => {
       conversation.push(msg);
 
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
+        // Save assistant reply to Turso
+        await saveMessage("assistant", msg.content || "");
         return res.json({ reply: msg.content || "", trace, cards });
       }
 
@@ -268,16 +293,27 @@ app.post("/chat", async (req, res) => {
     }
     return res.json({ reply: "I couldn't finish that. Try rephrasing.", trace, cards });
   } catch (e: any) {
+    console.error("chat error:", e);
     return res.status(500).json({ error: e.message, trace });
   }
 });
 
-app.post("/reset", (_req, res) => {
+app.post("/reset", async (_req, res) => {
+  try {
+    await db.execute("DELETE FROM sessions");
+  } catch (e) {
+    console.error("reset failed:", e);
+  }
   conversation = [];
   res.json({ ok: true });
 });
 
-const PORT = process.env.PORT || 8081;
-app.listen(PORT, () => {
-  console.log(`MCP + web UI on http://localhost:${PORT}`);
-});
+// Load previous conversation on startup
+(async () => {
+  conversation = await loadConversation();
+  const PORT = process.env.PORT || 8081;
+  app.listen(PORT, () => {
+    console.log(`MCP + web UI on http://localhost:${PORT}`);
+    console.log(`Loaded ${conversation.length} messages from Turso`);
+  });
+})();
