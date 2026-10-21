@@ -14,6 +14,7 @@
   .msg { padding: 10px 14px; border-radius: 14px; max-width: 85%; line-height: 1.45; font-size: 15px; white-space: pre-wrap; }
   .user { background: #4a6b4a; color: white; align-self: flex-end; border-bottom-right-radius: 4px; }
   .agent { background: #f0ede8; color: #2b2b2b; align-self: flex-start; border-bottom-left-radius: 4px; }
+  .msg.proactive { border-left: 4px solid #d9534f; background: #fff5f5; }
   .trace { font-size: 11px; color: #666; font-family: ui-monospace, monospace; padding: 6px 10px; background: #faf8f4; border-radius: 6px; align-self: flex-start; max-width: 90%; word-break: break-word; }
   .trace strong { color: #4a6b4a; }
   form { display: flex; padding: 12px; gap: 8px; border-top: 1px solid #eee; }
@@ -199,6 +200,24 @@ if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
 } else {
   micBtn.style.display = "none";
 }
+
+// Proactive notifications via SSE
+const events = new EventSource("/events");
+events.onmessage = function(ev) {
+  try {
+    const data = JSON.parse(ev.data);
+    if (data.type === "connected") return;
+    if (data.type === "proactive") {
+      const div = addMsg("agent", data.message);
+      div.classList.add("proactive");
+      speak(data.message);
+      if (data.card) renderCard(data.card);
+    }
+  } catch (e) { console.error("SSE parse error:", e); }
+};
+events.onerror = function() {
+  // browser reconnects automatically
+};
 
 async function reset() {
   await fetch("/reset", { method: "POST" });

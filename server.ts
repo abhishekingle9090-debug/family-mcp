@@ -18,6 +18,9 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
+// Tracks items already notified, so we don't spam
+const notifiedItems = new Set<string>();
+
 // ---------- MCP server (tools) ----------
 function buildServer(): McpServer {
   const server = new McpServer({ name: "family-assistant", version: "1.0.0" });
@@ -189,6 +192,9 @@ function buildServer(): McpServer {
         args: [date, time],
       });
 
+      // Item booked — don't notify about it again
+      notifiedItems.delete(item);
+
       return {
         content: [{ type: "text", text: `Booked delivery for ${item} on ${date} at ${time}.` }],
         structuredContent: {
@@ -337,7 +343,9 @@ OTHER RULES:
 - If the user asks what's booked or about appointments, call list_appointments and report the result.
 - If the user says "book X for date/time" directly, call book_delivery immediately with confirmed=true — let the tool validate.
 - If any tool errors, tell the user it failed. Never claim success.
-- Keep replies short and warm.`;let conversation: any[] = [];
+- Keep replies short and warm.`;
+
+let conversation: any[] = [];
 
 async function loadConversation(): Promise<any[]> {
   try {
@@ -428,8 +436,86 @@ app.post("/reset", async (_req, res) => {
     console.error("reset failed:", e);
   }
   conversation = [];
+  notifiedItems.clear();
   res.json({ ok: true });
 });
+
+// ---------- Proactive notifications via SSE ----------
+const sseClients: any[] = [];
+
+app.get("/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  sseClients.push(res);
+  // Initial ping so client knows connection is live
+  res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
+
+  req.on("close", () => {
+    const idx = sseClients.indexOf(res);
+    if (idx >= 0) sseClients.splice(idx, 1);
+  });
+});
+
+function broadcastSSE(payload: any) {
+  const data = `data: ${JSON.stringify(payload)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(data);
+    } catch (e) {
+      // ignore dead clients
+    }
+  }
+}
+
+// Keep-alive ping every 25s so proxies (Render) don't kill idle SSE
+setInterval(() => {
+  for (const client of sseClients) {
+    try {
+      client.write(": ping\n\n");
+    } catch (e) {
+      // ignore
+    }
+  }
+}, 25000);
+
+// Background proactive check
+const PROACTIVE_INTERVAL_MS = Number(process.env.PROACTIVE_INTERVAL_MS || 30000);
+
+setInterval(async () => {
+  if (sseClients.length === 0) return;
+  try {
+    const rs = await db.execute(
+      "SELECT item_name, quantity, threshold FROM inventory WHERE quantity <= threshold"
+    );
+    for (const row of rs.rows) {
+      const name = String(row.item_name);
+      if (notifiedItems.has(name)) continue;
+      notifiedItems.add(name);
+
+      const message = `Heads up: ${name} is running low (${row.quantity} left). Want me to book a delivery?`;
+
+      // Give the LLM the context so a follow-up "yes" makes sense
+      conversation.push({ role: "assistant", content: message });
+      await saveMessage("assistant", message);
+
+      broadcastSSE({
+        type: "proactive",
+        message,
+        card: {
+          type: "inventory_alert",
+          items: [{ name, quantity: Number(row.quantity), threshold: Number(row.threshold) }],
+          hasLowStock: true,
+        },
+      });
+    }
+  } catch (e) {
+    console.error("proactive check failed:", e);
+  }
+}, PROACTIVE_INTERVAL_MS);
 
 (async () => {
   conversation = await loadConversation();
@@ -437,5 +523,6 @@ app.post("/reset", async (_req, res) => {
   app.listen(PORT, () => {
     console.log(`MCP + web UI on http://localhost:${PORT}`);
     console.log(`Loaded ${conversation.length} messages from Turso`);
+    console.log(`Proactive check every ${PROACTIVE_INTERVAL_MS}ms`);
   });
 })();
