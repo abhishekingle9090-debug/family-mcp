@@ -21,15 +21,20 @@
   input:focus { border-color: #4a6b4a; }
   button[type=submit] { padding: 12px 20px; background: #4a6b4a; color: white; border: none; border-radius: 24px; cursor: pointer; font-size: 15px; }
   button[type=submit]:disabled { opacity: 0.5; }
+
   #mic { background: #e8f0e6; border: none; border-radius: 50%; width: 44px; height: 44px; font-size: 18px; cursor: pointer; }
   #mic:hover { background: #d0dccd; }
   #mic.listening { background: #d9534f; animation: pulse 1s infinite; }
   @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
 
+  #mute { background: #e8f0e6; border: none; border-radius: 50%; width: 44px; height: 44px; font-size: 18px; cursor: pointer; }
+  #mute:hover { background: #d0dccd; }
+  #mute.muted { background: #f5d0cc; }
+
   .card { background: white; border: 1px solid #e0dcd5; border-radius: 12px; padding: 14px 16px; align-self: flex-start; max-width: 90%; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
   .card-alert { border-left: 4px solid #d9534f; background: #fdf5f5; }
   .card-slots { border-left: 4px solid #4a6b4a; background: #f5f8f4; }
-.card-weather { border-left: 4px solid #6a9bd4; background: #f4f8fc; }
+  .card-weather { border-left: 4px solid #6a9bd4; background: #f4f8fc; }
   .card-success { border-left: 4px solid #2d7a2d; background: #f0f8f0; }
   .card-title { font-weight: 600; margin-bottom: 8px; color: #2b2b2b; }
   .card-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #f0ece6; }
@@ -49,6 +54,7 @@
   <div id="messages"></div>
   <form id="form">
     <input id="input" placeholder="Ask about inventory or book a delivery..." autocomplete="off" autofocus>
+    <button type="button" id="mute" title="Mute voice">🔊</button>
     <button type="button" id="mic" title="Speak">🎤</button>
     <button type="submit" id="send">Send</button>
   </form>
@@ -59,6 +65,27 @@ const form = document.getElementById("form");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
 const micBtn = document.getElementById("mic");
+const muteBtn = document.getElementById("mute");
+let voiceMuted = false;
+
+function speak(text) {
+  if (voiceMuted) return;
+  if (!("speechSynthesis" in window)) return;
+  if (!text || text === "…" || text.length > 500) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "en-US";
+  utterance.rate = 1.0;
+  utterance.pitch = 1.0;
+  window.speechSynthesis.speak(utterance);
+}
+
+muteBtn.addEventListener("click", function() {
+  voiceMuted = !voiceMuted;
+  muteBtn.textContent = voiceMuted ? "🔇" : "🔊";
+  muteBtn.classList.toggle("muted", voiceMuted);
+  if (voiceMuted) window.speechSynthesis.cancel();
+});
 
 function addMsg(role, text) {
   const div = document.createElement("div");
@@ -112,8 +139,7 @@ function renderCard(card) {
     div.innerHTML = '<div class="card-title">' + emoji + ' ' + title + '</div>' +
       '<div class="card-row"><span>' + card.city + ' — ' + card.date + '</span></div>' +
       '<div class="card-row"><span>Rain chance: ' + card.rainChance + '%</span></div>';
-  } 
-else {
+  } else {
     return;
   }
   messagesEl.appendChild(div);
@@ -137,6 +163,7 @@ async function send(text) {
     });
     const data = await res.json();
     thinking.textContent = data.reply || data.error || "(no reply)";
+    speak(data.reply || "");
     addTrace(data.trace);
     if (data.cards) data.cards.forEach(renderCard);
   } catch (e) {
@@ -176,6 +203,7 @@ if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
 async function reset() {
   await fetch("/reset", { method: "POST" });
   messagesEl.innerHTML = "";
+  window.speechSynthesis.cancel();
   addMsg("agent", "Hi! I can check inventory, find slots, and book deliveries. What's on your mind?");
 }
 
