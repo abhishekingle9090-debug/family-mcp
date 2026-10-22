@@ -361,6 +361,8 @@ OTHER RULES:
 - If any tool errors, tell the user it failed. Never claim success.`;
 
 let conversation: any[] = [];
+let lastUserMessageAt = 0;
+const IDLE_THRESHOLD_MS = Number(process.env.IDLE_THRESHOLD_MS || 2 * 60 * 1000);
 
 async function loadConversation(): Promise<any[]> {
   try {
@@ -437,6 +439,7 @@ app.post("/chat", async (req, res) => {
     return res.status(400).json({ error: "message required" });
   }
 
+  lastUserMessageAt = Date.now();
   await saveMessage("user", message);
   conversation.push({ role: "user", content: message });
 
@@ -445,8 +448,6 @@ app.post("/chat", async (req, res) => {
 
   try {
     for (let turn = 0; turn < 8; turn++) {
-      // Turn 0: force at least one tool call to prevent hallucinated replies.
-      // Subsequent turns: let the model decide (needed for final text reply).
       const forceTool = turn === 0;
       const response = await callGroq(
         [{ role: "system", content: SYSTEM_PROMPT }, ...conversation],
@@ -483,6 +484,7 @@ app.post("/reset", async (_req, res) => {
   }
   conversation = [];
   notifiedItems.clear();
+  lastUserMessageAt = Date.now(); // reset idle timer
   res.json({ ok: true });
 });
 
@@ -530,6 +532,15 @@ const PROACTIVE_INTERVAL_MS = Number(process.env.PROACTIVE_INTERVAL_MS || 30000)
 
 setInterval(async () => {
   if (sseClients.length === 0) return;
+
+  // Only notify when user is idle (not actively chatting)
+  if (lastUserMessageAt > 0) {
+    const timeSinceLastUser = Date.now() - lastUserMessageAt;
+    if (timeSinceLastUser < IDLE_THRESHOLD_MS) {
+      return; // user is active — skip
+    }
+  }
+
   try {
     const rs = await db.execute(
       "SELECT item_name, quantity, threshold FROM inventory WHERE quantity <= threshold"
@@ -567,6 +578,6 @@ setInterval(async () => {
   app.listen(PORT, () => {
     console.log(`MCP + web UI on http://localhost:${PORT}`);
     console.log(`Loaded ${conversation.length} messages from Turso`);
-    console.log(`Proactive check every ${PROACTIVE_INTERVAL_MS}ms`);
+    console.log(`Proactive check every ${PROACTIVE_INTERVAL_MS}ms (only when idle for ${IDLE_THRESHOLD_MS}ms)`);
   });
 })();
