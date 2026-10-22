@@ -18,9 +18,9 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
+const MODEL = "openai/gpt-oss-20b";
 const notifiedItems = new Set<string>();
 
-// ---------- MCP server (tools) ----------
 function buildServer(): McpServer {
   const server = new McpServer({ name: "family-assistant", version: "1.0.0" });
 
@@ -48,8 +48,46 @@ function buildServer(): McpServer {
   );
 
   server.tool(
+    "find_upcoming_slots",
+    "Find the next available delivery slots across the next 7 days. Use this instead of checking dates one by one.",
+    {},
+    async () => {
+      const rs = await db.execute({
+        sql: `SELECT date, time FROM availability 
+              WHERE is_booked = 0 AND date >= date('now')
+              ORDER BY date, time
+              LIMIT 30`,
+        args: [],
+      });
+      const byDate: Record<string, string[]> = {};
+      for (const row of rs.rows) {
+        const d = String(row.date);
+        if (!byDate[d]) byDate[d] = [];
+        byDate[d].push(String(row.time));
+      }
+      const days = Object.keys(byDate).sort();
+      if (days.length === 0) {
+        return {
+          content: [{ type: "text", text: "No upcoming slots available in the next several days." }],
+          structuredContent: { type: "slot_picker", date: "next 7 days", slots: [], byDate: {} },
+        };
+      }
+      const summary = days.map((d) => `${d}: ${byDate[d].join(", ")}`).join(" | ");
+      return {
+        content: [{ type: "text", text: `Upcoming available slots — ${summary}` }],
+        structuredContent: {
+          type: "slot_picker",
+          date: `${days[0]} to ${days[days.length - 1]}`,
+          slots: [],
+          byDate,
+        },
+      };
+    }
+  );
+
+  server.tool(
     "find_available_slots",
-    "Find available appointment slots on a given date.",
+    "Find available appointment slots on a single given date. Prefer find_upcoming_slots for most cases.",
     { date: z.string().describe("Date in YYYY-MM-DD format") },
     async ({ date }) => {
       const rs = await db.execute({
@@ -229,7 +267,6 @@ function buildServer(): McpServer {
   return server;
 }
 
-// ---------- Express app ----------
 const app = express();
 app.use(express.json());
 app.use(express.static("public"));
@@ -250,7 +287,6 @@ app.post("/mcp", async (req, res) => {
 app.get("/mcp", (_req, res) => res.status(405).end());
 app.delete("/mcp", (_req, res) => res.status(405).end());
 
-// ---------- LLM tool definitions ----------
 const LLM_TOOLS = [
   {
     type: "function" as const,
@@ -263,8 +299,16 @@ const LLM_TOOLS = [
   {
     type: "function" as const,
     function: {
+      name: "find_upcoming_slots",
+      description: "Find upcoming delivery slots across the next 7 days in a single call. ALWAYS use this instead of checking dates one by one.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "find_available_slots",
-      description: "Find available slots on a date. If today has zero slots, call again for tomorrow.",
+      description: "Find available slots on a single specific date. Only use if the user has explicitly named a date.",
       parameters: {
         type: "object",
         properties: { date: { type: "string" } },
@@ -317,49 +361,47 @@ const LLM_TOOLS = [
 const SYSTEM_PROMPT = `Current date: ${new Date().toISOString().split("T")[0]}.
 You are a proactive family caretaker assistant.
 
-CONTEXT AWARENESS:
-- If you already proposed a slot in the previous turn and the user just greets you or says "ok", DO NOT re-run the full inventory/weather/slot check. Reply briefly and remind them of the pending proposal.
-- Only re-run the full tool chain if the user asks a new question (e.g., "what's booked?", "book it", "check again").
 MANDATORY TOOL USE — READ THIS FIRST:
-- You have tools. You MUST use them. NEVER answer about inventory, weather, slots, or bookings from your own knowledge.
-- If the user asks ANYTHING related to inventory, weather, slots, or appointments, you MUST call the appropriate tool before replying.
+- You have tools. You MUST use them when the user asks about inventory, weather, slots, appointments, or booking.
+- NEVER answer those questions from your own knowledge. Always call the tool.
 - NEVER invent, guess, or simulate tool results. Only report what the tool actually returned.
 - If a tool call fails, report the failure. Do NOT make up a success message.
-- If the user just greets you (hi, hello, namaste), you MUST still call check_inventory first, then reply based on its result.
 - For booking confirmation, you MUST call book_delivery with confirmed=true. Do NOT say "booked" without calling the tool.
-- If today has zero slots, you MUST call find_available_slots for tomorrow. Never stop at "no slots" after one check.
-- NEVER say things like "we have slots available" or "you can book at X" unless you actually called find_available_slots and saw the result.
 
-TOOL CALL RULES:
-- Only use these tools: check_inventory, check_weather, find_available_slots, book_delivery, list_appointments.
-- NEVER invent a tool name. NEVER skip the tool call and answer from memory.
+SLOT LOOKUP — CRITICAL:
+- When you need to propose delivery slots, call find_upcoming_slots ONE TIME. It returns slots across the next 7 days grouped by date.
+- Do NOT call find_available_slots for each day one by one. That is slow and produces noise.
+- Only use find_available_slots if the user has explicitly named a specific date (e.g., "what about 24th?").
+- After find_upcoming_slots returns a grouped list, present the dates and times to the user and ask which one they want.
+
+GREETINGS AND SMALL TALK:
+- If the user just greets you (hi, hello, namaste, hey) or makes small talk, DO NOT call any tools. Just reply with a short friendly greeting.
+- Only call tools when the user asks something related to inventory, weather, delivery slots, appointments, or booking.
+- If you already proposed a slot in the previous turn and the user just greets you again, DO NOT re-run the tools. Briefly remind them of the pending proposal.
 
 LANGUAGE:
-- Reply in the same language the user used. If they wrote in Hindi (Devanagari or Roman like "Tylenol low hai, book kar do"), reply in natural Hindi. Otherwise reply in English.
+- Reply in the same language the user used. If they wrote in Hindi (Devanagari or Roman), reply in natural Hindi. Otherwise reply in English.
 - Keep replies short, warm, and natural.
 
-STRICT TOOL ORDER (do not skip):
-When responding to a greeting or a delivery request, you MUST call the tools in this exact order:
-  1. check_inventory
-  2. check_weather (ALWAYS, no exceptions — use "Mumbai" as the city if unknown, and today's date)
-  3. find_available_slots (today, or tomorrow if weather says rain > 50%)
-  4. reply with a proposal and ask for confirmation
-Never call find_available_slots before check_weather.
+TOOL ORDER (only when the user asks a relevant question):
+1. check_inventory
+2. check_weather (Mumbai, today's date)
+3. find_upcoming_slots (ONE call — covers 7 days)
+4. Present the grouped slots and ask which one the user wants
 
 WEATHER-AWARE DELIVERY:
-- If check_weather returns rain chance > 50%, propose TOMORROW's slot instead of today, and tell the user the reason.
-- If weather is fine, propose today's slots normally.
+- If check_weather returns rain chance > 50%, prefer slots from tomorrow onward, not today.
 
 CONFIRMATION FLOW:
-- After proposing a slot, WAIT for explicit confirmation from the user (yes / haan / theek hai / book karo).
-- Only after the user confirms, call book_delivery with confirmed=true.
+- After proposing slots, WAIT for explicit confirmation (yes / haan / theek hai / book karo / date + time).
+- Only after the user confirms a specific date + time, call book_delivery with confirmed=true.
 
 REJECTION HANDLING:
 - If book_delivery returns "Rejected: ...", tell the user the exact reason and suggest alternatives.
 - Never claim success unless book_delivery returned a result starting with "Booked".
 
 OTHER RULES:
-- If the user asks what's booked or about appointments, call list_appointments and report the result.
+- If the user asks what's booked, call list_appointments and report.
 - If the user says "book X for date/time" directly, call book_delivery immediately with confirmed=true — let the tool validate.
 - If any tool errors, tell the user it failed. Never claim success.`;
 
@@ -400,39 +442,13 @@ async function callMcp(name: string, args: any): Promise<{ text: string; structu
     const structured = (result as any).structuredContent || null;
     return { text, structured };
   } catch (e: any) {
-    console.error(`Tool ${name} failed with args ${JSON.stringify(args)}:`, e.message);
+    console.error(`Tool ${name} failed:`, e.message);
     return {
       text: `Error: The tool ${name} rejected the request. Reason: ${e.message}. Do NOT claim success. Tell the user it failed.`,
       structured: null,
     };
   } finally {
     await client.close();
-  }
-}
-
-async function callGroq(messages: any[], forceTool: boolean) {
-  try {
-    return await groq.chat.completions.create({
-      model: "openai/gpt-oss-120b",
-      messages,
-      tools: LLM_TOOLS as any,
-      tool_choice: forceTool ? "required" : "auto",
-      temperature: 0.1,
-      include_reasoning: false,
-    });
-  } catch (e: any) {
-    if (forceTool) {
-    //  console.warn("tool_choice 'required' failed, falling back to 'auto':", e.message);
-      return await groq.chat.completions.create({
-        model: "openai/gpt-oss-120b",
-        messages,
-        tools: LLM_TOOLS as any,
-        tool_choice: "auto",
-        temperature: 0.1,
-        include_reasoning: false,
-      });
-    }
-    throw e;
   }
 }
 
@@ -451,11 +467,14 @@ app.post("/chat", async (req, res) => {
 
   try {
     for (let turn = 0; turn < 8; turn++) {
-      const forceTool = turn === 0;
-      const response = await callGroq(
-        [{ role: "system", content: SYSTEM_PROMPT }, ...conversation],
-        forceTool
-      );
+      const response = await groq.chat.completions.create({
+        model: MODEL,
+        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...conversation],
+        tools: LLM_TOOLS as any,
+        tool_choice: "auto",
+        temperature: 0.1,
+        include_reasoning: false,
+      });
       const msg = response.choices[0].message;
       conversation.push(msg);
 
@@ -474,7 +493,13 @@ app.post("/chat", async (req, res) => {
     }
     return res.json({ reply: "I couldn't finish that. Try rephrasing.", trace, cards });
   } catch (e: any) {
-    console.error("chat error:", e);
+    console.error("chat error:", e.message);
+    if (e.message && e.message.includes("429")) {
+      return res.status(429).json({
+        error: "Rate limit hit. Please wait a minute and try again, or switch the model.",
+        trace,
+      });
+    }
     return res.status(500).json({ error: e.message, trace });
   }
 });
@@ -487,11 +512,10 @@ app.post("/reset", async (_req, res) => {
   }
   conversation = [];
   notifiedItems.clear();
-  lastUserMessageAt = Date.now(); // reset idle timer
+  lastUserMessageAt = Date.now();
   res.json({ ok: true });
 });
 
-// ---------- Proactive notifications via SSE ----------
 const sseClients: any[] = [];
 
 app.get("/events", (req, res) => {
@@ -515,9 +539,7 @@ function broadcastSSE(payload: any) {
   for (const client of sseClients) {
     try {
       client.write(data);
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }
 }
 
@@ -525,9 +547,7 @@ setInterval(() => {
   for (const client of sseClients) {
     try {
       client.write(": ping\n\n");
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }
 }, 25000);
 
@@ -536,23 +556,19 @@ const PROACTIVE_INTERVAL_MS = Number(process.env.PROACTIVE_INTERVAL_MS || 30000)
 setInterval(async () => {
   if (sseClients.length === 0) return;
 
-  // Only notify when user is idle (not actively chatting)
   if (lastUserMessageAt > 0) {
     const timeSinceLastUser = Date.now() - lastUserMessageAt;
-    if (timeSinceLastUser < IDLE_THRESHOLD_MS) {
-      return; // user is active — skip
-    }
+    if (timeSinceLastUser < IDLE_THRESHOLD_MS) return;
   }
 
   try {
     const rs = await db.execute(
       "SELECT item_name, quantity, threshold FROM inventory WHERE quantity <= threshold"
     );
-        for (const row of rs.rows) {
+    for (const row of rs.rows) {
       const name = String(row.item_name);
       if (notifiedItems.has(name)) continue;
 
-      // Skip if there's already an upcoming booking for this item
       const upcoming = await db.execute({
         sql: "SELECT id FROM appointments WHERE status LIKE ? AND date >= date('now')",
         args: [`delivery: ${name}%`],
@@ -589,6 +605,7 @@ setInterval(async () => {
   app.listen(PORT, () => {
     console.log(`MCP + web UI on http://localhost:${PORT}`);
     console.log(`Loaded ${conversation.length} messages from Turso`);
+    console.log(`Model: ${MODEL}`);
     console.log(`Proactive check every ${PROACTIVE_INTERVAL_MS}ms (only when idle for ${IDLE_THRESHOLD_MS}ms)`);
   });
 })();

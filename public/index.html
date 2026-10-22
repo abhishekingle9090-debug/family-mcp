@@ -44,8 +44,10 @@
   .card-weather { border-left: 4px solid #6a9bd4; background: #f4f8fc; }
   .card-success { border-left: 4px solid #2d7a2d; background: #f0f8f0; }
   .card-title { font-weight: 600; margin-bottom: 8px; color: #2b2b2b; }
-  .card-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #f0ece6; }
+  .card-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #f0ece6; gap: 12px; }
   .card-row:last-child { border-bottom: none; }
+  .card-row .date { font-weight: 500; }
+  .card-row .times { color: #4a6b4a; text-align: right; }
   .badge { background: #d9534f; color: white; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
   .slot-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .slot-btn { padding: 8px 16px; background: #4a6b4a; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; }
@@ -102,18 +104,59 @@ function toggleLang() {
   updateLangUI();
 }
 
-// TTS: pick voice by script of the text
+// ---------- Voice synthesis ----------
+let cachedVoices = [];
+
+function loadVoices() {
+  if (!("speechSynthesis" in window)) return;
+  cachedVoices = window.speechSynthesis.getVoices();
+  console.log("[TTS] Loaded voices:", cachedVoices.map(v => v.lang + " / " + v.name).join(", "));
+}
+
+if ("speechSynthesis" in window) {
+  loadVoices();
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+}
+
+function pickVoiceFor(lang) {
+  if (cachedVoices.length === 0) {
+    cachedVoices = window.speechSynthesis.getVoices();
+  }
+  let v = cachedVoices.find(x => x.lang === lang);
+  if (v) return v;
+  const prefix = lang.split("-")[0];
+  v = cachedVoices.find(x => x.lang.startsWith(prefix));
+  if (v) return v;
+  return cachedVoices.find(x => x.lang.startsWith("en")) || cachedVoices[0] || null;
+}
+
 function speak(text) {
   if (voiceMuted) return;
   if (!("speechSynthesis" in window)) return;
   if (!text || text === "…" || text.length > 500) return;
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  const isHindiText = /[\u0900-\u097F]/.test(text);
-  utterance.lang = isHindiText ? "hi-IN" : "en-US";
-  utterance.rate = 1.0;
-  utterance.pitch = 1.0;
-  window.speechSynthesis.speak(utterance);
+
+  const synth = window.speechSynthesis;
+  try { synth.resume(); } catch (e) {}
+
+  const doSpeak = () => {
+    const utterance = new SpeechSynthesisUtterance(text);
+    const isHindiText = /[\u0900-\u097F]/.test(text);
+    const targetLang = isHindiText ? "hi-IN" : "en-US";
+    utterance.lang = targetLang;
+    const voice = pickVoiceFor(targetLang);
+    if (voice) utterance.voice = voice;
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.onerror = (e) => console.warn("[TTS] Utterance error:", e.error);
+    synth.speak(utterance);
+  };
+
+  if (synth.speaking) {
+    synth.cancel();
+    setTimeout(doSpeak, 150);
+  } else {
+    doSpeak();
+  }
 }
 
 muteBtn.addEventListener("click", function() {
@@ -155,7 +198,17 @@ function renderCard(card) {
     div.innerHTML = '<div class="card-title">⚠️ Low Stock Alert</div>' + rows;
   } else if (card.type === "slot_picker") {
     div.className = "card card-slots";
-    if (!card.slots || card.slots.length === 0) {
+    // New: grouped by date (multi-day upcoming slots)
+    if (card.byDate && Object.keys(card.byDate).length > 0) {
+      var dates = Object.keys(card.byDate).sort();
+      var html = '<div class="card-title">📅 Upcoming Slots</div>';
+      dates.forEach(function(d) {
+        html += '<div class="card-row"><span class="date">' + d + '</span><span class="times">' + card.byDate[d].join(" · ") + '</span></div>';
+      });
+      div.innerHTML = html;
+    }
+    // Existing behaviour: single-date slots with buttons
+    else if (!card.slots || card.slots.length === 0) {
       div.innerHTML = '<div class="card-title">📅 No Slots Available — ' + card.date + '</div>';
     } else {
       var btns = card.slots.map(function(s) {
@@ -245,7 +298,7 @@ events.onmessage = function(ev) {
   try {
     const data = JSON.parse(ev.data);
     if (data.type === "connected") return;
-        if (data.type === "proactive") {
+    if (data.type === "proactive") {
       const msg = currentLang === "hi-IN" && data.messageHi ? data.messageHi : data.message;
       const div = addMsg("agent", msg);
       div.classList.add("proactive");
