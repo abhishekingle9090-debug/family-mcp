@@ -317,6 +317,9 @@ const LLM_TOOLS = [
 const SYSTEM_PROMPT = `Current date: ${new Date().toISOString().split("T")[0]}.
 You are a proactive family caretaker assistant.
 
+CONTEXT AWARENESS:
+- If you already proposed a slot in the previous turn and the user just greets you or says "ok", DO NOT re-run the full inventory/weather/slot check. Reply briefly and remind them of the pending proposal.
+- Only re-run the full tool chain if the user asks a new question (e.g., "what's booked?", "book it", "check again").
 MANDATORY TOOL USE — READ THIS FIRST:
 - You have tools. You MUST use them. NEVER answer about inventory, weather, slots, or bookings from your own knowledge.
 - If the user asks ANYTHING related to inventory, weather, slots, or appointments, you MUST call the appropriate tool before replying.
@@ -419,7 +422,7 @@ async function callGroq(messages: any[], forceTool: boolean) {
     });
   } catch (e: any) {
     if (forceTool) {
-      console.warn("tool_choice 'required' failed, falling back to 'auto':", e.message);
+    //  console.warn("tool_choice 'required' failed, falling back to 'auto':", e.message);
       return await groq.chat.completions.create({
         model: "openai/gpt-oss-120b",
         messages,
@@ -545,9 +548,17 @@ setInterval(async () => {
     const rs = await db.execute(
       "SELECT item_name, quantity, threshold FROM inventory WHERE quantity <= threshold"
     );
-    for (const row of rs.rows) {
+        for (const row of rs.rows) {
       const name = String(row.item_name);
       if (notifiedItems.has(name)) continue;
+
+      // Skip if there's already an upcoming booking for this item
+      const upcoming = await db.execute({
+        sql: "SELECT id FROM appointments WHERE status LIKE ? AND date >= date('now')",
+        args: [`delivery: ${name}%`],
+      });
+      if (upcoming.rows.length > 0) continue;
+
       notifiedItems.add(name);
 
       const message = `Heads up: ${name} is running low (${row.quantity} left). Want me to book a delivery?`;
