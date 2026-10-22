@@ -264,7 +264,7 @@ const LLM_TOOLS = [
     type: "function" as const,
     function: {
       name: "find_available_slots",
-      description: "Find available slots on a date.",
+      description: "Find available slots on a date. If today has zero slots, call again for tomorrow.",
       parameters: {
         type: "object",
         properties: { date: { type: "string" } },
@@ -291,7 +291,7 @@ const LLM_TOOLS = [
     type: "function" as const,
     function: {
       name: "book_delivery",
-      description: "Book a delivery. Only with explicit user confirmation.",
+      description: "Book a delivery. Only with explicit user confirmation. NEVER claim success without calling this tool.",
       parameters: {
         type: "object",
         properties: {
@@ -317,24 +317,35 @@ const LLM_TOOLS = [
 const SYSTEM_PROMPT = `Current date: ${new Date().toISOString().split("T")[0]}.
 You are a proactive family caretaker assistant.
 
+MANDATORY TOOL USE — READ THIS FIRST:
+- You have tools. You MUST use them. NEVER answer about inventory, weather, slots, or bookings from your own knowledge.
+- If the user asks ANYTHING related to inventory, weather, slots, or appointments, you MUST call the appropriate tool before replying.
+- NEVER invent, guess, or simulate tool results. Only report what the tool actually returned.
+- If a tool call fails, report the failure. Do NOT make up a success message.
+- If the user just greets you (hi, hello, namaste), you MUST still call check_inventory first, then reply based on its result.
+- For booking confirmation, you MUST call book_delivery with confirmed=true. Do NOT say "booked" without calling the tool.
+- If today has zero slots, you MUST call find_available_slots for tomorrow. Never stop at "no slots" after one check.
+- NEVER say things like "we have slots available" or "you can book at X" unless you actually called find_available_slots and saw the result.
+
+TOOL CALL RULES:
+- Only use these tools: check_inventory, check_weather, find_available_slots, book_delivery, list_appointments.
+- NEVER invent a tool name. NEVER skip the tool call and answer from memory.
+
 LANGUAGE:
-- Reply in the same language the user used. If they wrote in Hindi (Devanagari or Roman Hindi like "Tylenol low hai, book kar do"), reply in natural Hindi. Otherwise reply in English.
-- Keep replies short, warm, and natural in whichever language you use.
+- Reply in the same language the user used. If they wrote in Hindi (Devanagari or Roman like "Tylenol low hai, book kar do"), reply in natural Hindi. Otherwise reply in English.
+- Keep replies short, warm, and natural.
 
 STRICT TOOL ORDER (do not skip):
 When responding to a greeting or a delivery request, you MUST call the tools in this exact order:
   1. check_inventory
   2. check_weather (ALWAYS, no exceptions — use "Mumbai" as the city if unknown, and today's date)
-  3. find_available_slots (for today, or tomorrow if weather says rain > 50%)
-  4. reply with a proposal and ask for confirmation (in the user's language)
-Never call find_available_slots before check_weather. If you skip check_weather, the response is invalid.
+  3. find_available_slots (today, or tomorrow if weather says rain > 50%)
+  4. reply with a proposal and ask for confirmation
+Never call find_available_slots before check_weather.
 
 WEATHER-AWARE DELIVERY:
 - If check_weather returns rain chance > 50%, propose TOMORROW's slot instead of today, and tell the user the reason.
 - If weather is fine, propose today's slots normally.
-
-SLOT FALLBACK:
-- If find_available_slots returns "No available slots" for today, you MUST immediately call find_available_slots for tomorrow and propose those slots. Never give up after one failed check.
 
 CONFIRMATION FLOW:
 - After proposing a slot, WAIT for explicit confirmation from the user (yes / haan / theek hai / book karo).
@@ -383,8 +394,40 @@ async function callMcp(name: string, args: any): Promise<{ text: string; structu
     const text = (result.content as any[]).map((c) => c.text || "").join("\n");
     const structured = (result as any).structuredContent || null;
     return { text, structured };
+  } catch (e: any) {
+    console.error(`Tool ${name} failed with args ${JSON.stringify(args)}:`, e.message);
+    return {
+      text: `Error: The tool ${name} rejected the request. Reason: ${e.message}. Do NOT claim success. Tell the user it failed.`,
+      structured: null,
+    };
   } finally {
     await client.close();
+  }
+}
+
+async function callGroq(messages: any[], forceTool: boolean) {
+  try {
+    return await groq.chat.completions.create({
+      model: "openai/gpt-oss-120b",
+      messages,
+      tools: LLM_TOOLS as any,
+      tool_choice: forceTool ? "required" : "auto",
+      temperature: 0.1,
+      include_reasoning: false,
+    });
+  } catch (e: any) {
+    if (forceTool) {
+      console.warn("tool_choice 'required' failed, falling back to 'auto':", e.message);
+      return await groq.chat.completions.create({
+        model: "openai/gpt-oss-120b",
+        messages,
+        tools: LLM_TOOLS as any,
+        tool_choice: "auto",
+        temperature: 0.1,
+        include_reasoning: false,
+      });
+    }
+    throw e;
   }
 }
 
@@ -402,14 +445,13 @@ app.post("/chat", async (req, res) => {
 
   try {
     for (let turn = 0; turn < 8; turn++) {
-      const response = await groq.chat.completions.create({
-        model: "openai/gpt-oss-120b",
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...conversation],
-        tools: LLM_TOOLS as any,
-        tool_choice: "auto",
-        temperature: 0.3,
-        include_reasoning: false,
-      });
+      // Turn 0: force at least one tool call to prevent hallucinated replies.
+      // Subsequent turns: let the model decide (needed for final text reply).
+      const forceTool = turn === 0;
+      const response = await callGroq(
+        [{ role: "system", content: SYSTEM_PROMPT }, ...conversation],
+        forceTool
+      );
       const msg = response.choices[0].message;
       conversation.push(msg);
 
@@ -503,7 +545,7 @@ setInterval(async () => {
       conversation.push({ role: "assistant", content: message });
       await saveMessage("assistant", message);
 
-            broadcastSSE({
+      broadcastSSE({
         type: "proactive",
         message,
         messageHi,
